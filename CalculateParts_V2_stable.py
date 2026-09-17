@@ -141,22 +141,22 @@ def get_oriented_dimensions(obj_id):
         arc_plane = ref_arc.Plane
         bend_angle = get_arc_bend_angle(ref_arc)
 
-        # Внутренний радиус берём не по списку распознанных кромок (там может
-        # оказаться только внешняя дуга), а по реальным габаритам детали
-        # относительно оси гиба: ближайшая к оси точка и есть внутренний радиус.
+        # Внешний радиус берём не по списку распознанных кромок (там может
+        # оказаться только внутренняя дуга), а по реальным габаритам детали
+        # относительно оси гиба: самая дальняя от оси точка и есть внешний радиус.
         r_min, r_max = get_radial_extents(brep, arc_plane)
 
         if r_min is not None and r_max is not None and (r_max - r_min) > 0.01:
-            radius = r_min
+            radius = r_max
             dim1 = r_max - r_min
         else:
-            radius = inner_arc.Radius
+            radius = outer_arc.Radius
             dim1 = outer_arc.Radius - inner_arc.Radius
 
-        # Длина заготовки считается по внутреннему радиусу: L = R_вн * угол.
+        # Длина заготовки считается по внешней длинной стороне: L = R_внеш * угол.
         arc_length = radius * bend_angle
         if arc_length <= 0.01:
-            arc_length = inner_arc.Length
+            arc_length = outer_arc.Length
 
         bbox = brep.GetBoundingBox(arc_plane)
         dim2 = bbox.Max.Z - bbox.Min.Z
@@ -277,10 +277,14 @@ def calculate_parts():
             else:
                 parts_data[key] = 1
 
-    def match_profile(t, w, known_profiles, tol=2):
+    def match_profile(t, w, known_profiles, tol=5):
+        # Допуск +-5 мм: деталь 50x54 опознаётся как профиль 50x50.
+        # Перебор по отсортированным ключам, иначе при равном отклонении
+        # (например 35x35 между 30x30 и 40x40) результат зависел бы от
+        # порядка ключей в словаре и менялся от запуска к запуску.
         best_match = None
         min_diff = float('inf')
-        for kt, kw in known_profiles:
+        for kt, kw in sorted(known_profiles):
             # check direct
             dt = abs(kt - t)
             dw = abs(kw - w)
@@ -429,7 +433,7 @@ def calculate_parts():
                 header_row = row
                 sh.Cells(row, 1).Value = u"Профиль"
                 sh.Cells(row, 2).Value = u"Длина"
-                sh.Cells(row, 3).Value = u"Радиус (внутр.)"
+                sh.Cells(row, 3).Value = u"Радиус (внешн.)"
                 sh.Cells(row, 4).Value = u"Количество"
                 sh.Cells(row, 5).Value = u"Вес"
                 row += 1
@@ -571,7 +575,7 @@ def calculate_parts():
             for i, prof_key in enumerate(sorted_curved_profiles):
                 f.write(u"\n")
                 
-                f.write(u"Профиль;Длина;Радиус (внутр.);Количество;Вес\n")
+                f.write(u"Профиль;Длина;Радиус (внешн.);Количество;Вес\n")
                 profile_name = u"{}x{} (Радиусный)".format(prof_key[0], prof_key[1])
                 weight_per_m = PROFILE_WEIGHTS.get(prof_key, 0.0)
                 curved_items = sorted(curved_profiles[prof_key], key=lambda x: -x[0])
