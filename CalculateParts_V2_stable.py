@@ -232,6 +232,7 @@ def calculate_parts():
 
     parts_data = {}
     curved_parts_data = {}
+    sheets_data = {}
 
     PROFILE_WEIGHTS = {
         (20, 20): 0.69,
@@ -245,6 +246,68 @@ def calculate_parts():
         (100, 50): 3.46
     }
 
+    # Вес листовых материалов, кг/м2. Считан из плотности по открытым
+    # справочным данным: фанера берёзовая и ДСП 650 кг/м3, вспененный ПВХ
+    # 550 кг/м3, сталь 7850 кг/м3.
+    SHEET_MATERIALS = {
+        (u"Фанера", 15): 9.75,
+        (u"Фанера", 12): 7.8,
+        (u"Фанера", 9): 5.85,
+        (u"Фанера", 6): 3.9,
+        (u"ДСП", 16): 10.4,
+        (u"ПВХ", 8): 4.4,
+        (u"ПВХ", 5): 2.75,
+        (u"ПВХ", 3): 1.65,
+        (u"Сталь", 1): 7.85,
+        (u"Сталь", 2): 15.7,
+        (u"Сталь", 3): 23.55,
+        (u"Сталь", 5): 39.25,
+        (u"Сталь", 8): 62.8
+    }
+
+    # Толщины 3, 5 и 8 мм есть и у ПВХ, и у стали - по одной толщине их не
+    # различить, поэтому для них смотрим имя слоя детали.
+    MATERIAL_KEYWORDS = {
+        u"Фанера": (u"фанер", u"plywood", u"fanera"),
+        u"ДСП": (u"дсп", u"ldsp", u"chipboard"),
+        u"ПВХ": (u"пвх", u"pvc"),
+        u"Сталь": (u"сталь", u"стал", u"steel")
+    }
+
+    SHEET_THICKNESSES = set([t for (m, t) in SHEET_MATERIALS])
+
+    def is_sheet(dims):
+        """
+        Деталь считается листовой, если её наименьший габарит совпадает с
+        толщиной из базы, а средний габарит заметно больше толщины. Второе
+        условие отсекает бруски и короткие обрезки профиля: у настоящего
+        листа пласть минимум в 5 раз шире толщины и не меньше 50 мм.
+
+        Толщина сверяется точно (округление до миллиметра), а не с допуском
+        +-5 мм как у профилей: у листов 3, 5, 6, 8 и 9 мм такой допуск
+        смешал бы все материалы между собой.
+        """
+        if int(round(dims[0])) not in SHEET_THICKNESSES:
+            return False
+        return dims[1] >= dims[0] * 5 and dims[1] >= 50
+
+    def detect_sheet_material(thickness, layer_name):
+        """
+        Материал листа по толщине. Если толщина принадлежит только одному
+        материалу, имя слоя не нужно. Для спорных 3, 5 и 8 мм ищем в имени
+        слоя ключевое слово; если его нет, материал не угадываем, а
+        возвращаем None - такая деталь попадёт в отчёт с пометкой.
+        """
+        candidates = sorted([m for (m, t) in SHEET_MATERIALS if t == thickness])
+        if len(candidates) == 1:
+            return candidates[0]
+        name = (layer_name or u"").lower()
+        for material in candidates:
+            for keyword in MATERIAL_KEYWORDS.get(material, ()):
+                if keyword in name:
+                    return material
+        return None
+
     for obj in objects:
         dims, is_curved = get_oriented_dimensions(obj)
         if not dims:
@@ -256,6 +319,20 @@ def calculate_parts():
             dz = rs.Distance(bbox[0], bbox[4])
             dims = sorted([dx, dy, dz])
             is_curved = False
+
+        if not is_curved and is_sheet(dims):
+            thickness = int(round(dims[0]))
+            try:
+                layer_name = rs.ObjectLayer(obj)
+            except:
+                layer_name = u""
+            material = detect_sheet_material(thickness, layer_name)
+            key = (material, thickness, int(round(dims[1])), int(round(dims[2])))
+            if key in sheets_data:
+                sheets_data[key] += 1
+            else:
+                sheets_data[key] = 1
+            continue
 
         if is_curved:
             thickness = int(round(dims[0]))
@@ -334,7 +411,37 @@ def calculate_parts():
         curved_profiles[prof_key] = [(al, rad, c) for (al, rad), c in curved_profiles[prof_key].items()]
         
     sorted_curved_profiles = sorted(curved_profiles.keys())
-    
+
+    # Листовые детали группируем по паре (материал, толщина), внутри - по
+    # габариту пласти.
+    sheets = {}
+    for key, count in sheets_data.items():
+        material, thickness, w, l = key
+        grp_key = (material, thickness)
+        if grp_key not in sheets:
+            sheets[grp_key] = {}
+        size_key = (w, l)
+        if size_key not in sheets[grp_key]:
+            sheets[grp_key][size_key] = 0
+        sheets[grp_key][size_key] += count
+
+    for grp_key in sheets:
+        sheets[grp_key] = [(w, l, c) for (w, l), c in sheets[grp_key].items()]
+
+    # Материал может быть None (спорная толщина, слой молчит) - такие группы
+    # уходят в конец списка.
+    sorted_sheets = sorted(sheets.keys(),
+                           key=lambda g: (g[0] is None, g[0] or u"", g[1]))
+
+    def sheet_label(grp_key, weight_per_m2):
+        material, thickness = grp_key
+        if material is None:
+            return u"Лист {} мм (уточнить материал)".format(thickness)
+        label = u"{} {} мм".format(material, thickness)
+        if weight_per_m2 > 0:
+            label += u" ({} кг/м2)".format(str(weight_per_m2).replace('.', ','))
+        return label
+
     try:
         import System
         excel_type = System.Type.GetTypeFromProgID("Excel.Application")
@@ -364,8 +471,10 @@ def calculate_parts():
                 sh.Cells(row, 4).Value = u"Вес"
                 row += 1
                 
-                profile_name = u"{}x{}".format(prof_key[0], prof_key[1])
                 weight_per_m = PROFILE_WEIGHTS.get(prof_key, 0.0)
+                profile_name = u"{}x{}".format(prof_key[0], prof_key[1])
+                if weight_per_m > 0:
+                    profile_name += u" ({} кг/м.п.)".format(str(weight_per_m).replace('.', ','))
                 lengths = sorted(profiles[prof_key], key=lambda x: -x[0])
                 zone_total_weight = 0.0
                 
@@ -438,8 +547,11 @@ def calculate_parts():
                 sh.Cells(row, 5).Value = u"Вес"
                 row += 1
                 
-                profile_name = u"{}x{} (Радиусный)".format(prof_key[0], prof_key[1])
                 weight_per_m = PROFILE_WEIGHTS.get(prof_key, 0.0)
+                profile_name = u"{}x{} (Радиусный)".format(prof_key[0], prof_key[1])
+                if weight_per_m > 0:
+                    profile_name = u"{}x{} (Радиусный, {} кг/м.п.)".format(
+                        prof_key[0], prof_key[1], str(weight_per_m).replace('.', ','))
                 curved_items = sorted(curved_profiles[prof_key], key=lambda x: -x[0])
                 zone_total_weight = 0.0
                 
@@ -501,7 +613,74 @@ def calculate_parts():
                             total_range.Borders(edge).Weight = xlThick
                         except:
                             pass
-                            
+
+            for grp_key in sorted_sheets:
+                if row > 1:
+                    row += 1
+
+                header_row = row
+                sh.Cells(row, 1).Value = u"Материал"
+                sh.Cells(row, 2).Value = u"Толщина"
+                sh.Cells(row, 3).Value = u"Размер"
+                sh.Cells(row, 4).Value = u"Количество"
+                sh.Cells(row, 5).Value = u"Вес"
+                row += 1
+
+                weight_per_m2 = SHEET_MATERIALS.get(grp_key, 0.0)
+                material_name = sheet_label(grp_key, weight_per_m2)
+                sheet_items = sorted(sheets[grp_key], key=lambda x: -(x[0] * x[1]))
+                zone_total_weight = 0.0
+
+                for j, item in enumerate(sheet_items):
+                    sheet_w = item[0]
+                    sheet_l = item[1]
+                    count = item[2]
+                    total_weight = 0.0
+
+                    if weight_per_m2 > 0:
+                        total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
+                        zone_total_weight += total_weight
+                        overall_total_weight += total_weight
+
+                    if j == 0:
+                        sh.Cells(row, 1).Value = material_name
+                    else:
+                        sh.Cells(row, 1).Value = ""
+
+                    sh.Cells(row, 2).Value = grp_key[1]
+                    sh.Cells(row, 3).Value = u"{}x{}".format(sheet_w, sheet_l)
+                    sh.Cells(row, 4).Value = count
+                    sh.Cells(row, 5).Value = u"{} кг".format(str(total_weight).replace('.', ',')) if weight_per_m2 > 0 else u"Нет в базе"
+                    row += 1
+
+                total_row = None
+                if zone_total_weight > 0:
+                    zone_total_weight = round(zone_total_weight, 2)
+                    sh.Cells(row, 4).Value = u"Итого:"
+                    sh.Cells(row, 4).Font.Bold = True
+                    sh.Cells(row, 5).Value = u"{} кг".format(str(zone_total_weight).replace('.', ','))
+                    sh.Cells(row, 5).Font.Bold = True
+                    total_row = row
+                    row += 1
+
+                header_range = sh.Range(sh.Cells(header_row, 1), sh.Cells(header_row, 5))
+                header_range.Font.Bold = True
+                for edge in (7, 8, 9, 10, 11):
+                    try:
+                        header_range.Borders(edge).LineStyle = xlContinuous
+                        header_range.Borders(edge).Weight = xlThick
+                    except:
+                        pass
+
+                if total_row:
+                    total_range = sh.Range(sh.Cells(total_row, 4), sh.Cells(total_row, 5))
+                    for edge in (7, 8, 9, 10, 11):
+                        try:
+                            total_range.Borders(edge).LineStyle = xlContinuous
+                            total_range.Borders(edge).Weight = xlThick
+                        except:
+                            pass
+
             full_range = sh.Range(sh.Cells(1, 1), sh.Cells(row, 5))
             full_range.HorizontalAlignment = xlLeft
             full_range.VerticalAlignment = xlCenter
@@ -545,8 +724,10 @@ def calculate_parts():
                     f.write(u"\n")
                 
                 f.write(u"Профиль;Длина;Количество;Вес\n")
-                profile_name = u"{}x{}".format(prof_key[0], prof_key[1])
                 weight_per_m = PROFILE_WEIGHTS.get(prof_key, 0.0)
+                profile_name = u"{}x{}".format(prof_key[0], prof_key[1])
+                if weight_per_m > 0:
+                    profile_name += u" ({} кг/м.п.)".format(str(weight_per_m).replace('.', ','))
                 lengths = sorted(profiles[prof_key], key=lambda x: -x[0])
                 zone_total_weight = 0.0
                 
@@ -576,8 +757,11 @@ def calculate_parts():
                 f.write(u"\n")
                 
                 f.write(u"Профиль;Длина;Радиус (внешн.);Количество;Вес\n")
-                profile_name = u"{}x{} (Радиусный)".format(prof_key[0], prof_key[1])
                 weight_per_m = PROFILE_WEIGHTS.get(prof_key, 0.0)
+                profile_name = u"{}x{} (Радиусный)".format(prof_key[0], prof_key[1])
+                if weight_per_m > 0:
+                    profile_name = u"{}x{} (Радиусный, {} кг/м.п.)".format(
+                        prof_key[0], prof_key[1], str(weight_per_m).replace('.', ','))
                 curved_items = sorted(curved_profiles[prof_key], key=lambda x: -x[0])
                 zone_total_weight = 0.0
                 
@@ -604,6 +788,39 @@ def calculate_parts():
                     zone_weight_str = u"{} кг".format(str(zone_total_weight).replace('.', ','))
                     f.write(u";;;Итого:;{}\n".format(zone_weight_str))
             
+            for grp_key in sorted_sheets:
+                f.write(u"\n")
+
+                f.write(u"Материал;Толщина;Размер;Количество;Вес\n")
+                weight_per_m2 = SHEET_MATERIALS.get(grp_key, 0.0)
+                material_name = sheet_label(grp_key, weight_per_m2)
+                sheet_items = sorted(sheets[grp_key], key=lambda x: -(x[0] * x[1]))
+                zone_total_weight = 0.0
+
+                for j, item in enumerate(sheet_items):
+                    sheet_w = item[0]
+                    sheet_l = item[1]
+                    count = item[2]
+                    total_weight = 0.0
+
+                    if weight_per_m2 > 0:
+                        total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
+                        zone_total_weight += total_weight
+                        overall_total_weight_csv += total_weight
+
+                    weight_str = u"{} кг".format(str(total_weight).replace('.', ',')) if weight_per_m2 > 0 else u"Нет в базе"
+                    size_str = u"{}x{}".format(sheet_w, sheet_l)
+
+                    if j == 0:
+                        f.write(u"{};{};{};{};{}\n".format(material_name, grp_key[1], size_str, count, weight_str))
+                    else:
+                        f.write(u";{};{};{};{}\n".format(grp_key[1], size_str, count, weight_str))
+
+                if zone_total_weight > 0:
+                    zone_total_weight = round(zone_total_weight, 2)
+                    zone_weight_str = u"{} кг".format(str(zone_total_weight).replace('.', ','))
+                    f.write(u";;;Итого:;{}\n".format(zone_weight_str))
+
             if overall_total_weight_csv > 0:
                 overall_total_weight_csv = round(overall_total_weight_csv, 2)
                 overall_weight_str = u"{} кг".format(str(overall_total_weight_csv).replace('.', ','))
