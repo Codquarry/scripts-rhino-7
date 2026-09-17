@@ -260,7 +260,7 @@ def calculate_parts():
         if is_curved:
             thickness = int(round(dims[0]))
             width = int(round(dims[1]))
-            length = int(round(dims[2])) # длина дуги по внутреннему радиусу
+            length = int(round(dims[2])) # длина дуги по внешней стороне
             radius = int(round(dims[3]))
             key = (thickness, width, length, radius)
             if key in curved_parts_data:
