@@ -233,6 +233,7 @@ def calculate_parts():
     parts_data = {}
     curved_parts_data = {}
     sheets_data = {}
+    curved_sheets_data = {}
 
     PROFILE_WEIGHTS = {
         (20, 20): 0.69,
@@ -320,18 +321,28 @@ def calculate_parts():
             dims = sorted([dx, dy, dz])
             is_curved = False
 
-        if not is_curved and is_sheet(dims):
+        if is_sheet(dims):
             thickness = int(round(dims[0]))
             try:
                 layer_name = rs.ObjectLayer(obj)
             except:
                 layer_name = u""
             material = detect_sheet_material(thickness, layer_name)
-            key = (material, thickness, int(round(dims[1])), int(round(dims[2])))
-            if key in sheets_data:
-                sheets_data[key] += 1
+            if is_curved:
+                # dims гнутой детали: толщина, ширина, длина дуги, радиус.
+                # Площадь считаем по развёртке: ширина * длина дуги.
+                key = (material, thickness, int(round(dims[1])),
+                       int(round(dims[2])), int(round(dims[3])))
+                if key in curved_sheets_data:
+                    curved_sheets_data[key] += 1
+                else:
+                    curved_sheets_data[key] = 1
             else:
-                sheets_data[key] = 1
+                key = (material, thickness, int(round(dims[1])), int(round(dims[2])))
+                if key in sheets_data:
+                    sheets_data[key] += 1
+                else:
+                    sheets_data[key] = 1
             continue
 
         if is_curved:
@@ -433,6 +444,26 @@ def calculate_parts():
     sorted_sheets = sorted(sheets.keys(),
                            key=lambda g: (g[0] is None, g[0] or u"", g[1]))
 
+    # Гнутые листы - та же пара (материал, толщина), внутри - ширина,
+    # длина дуги и радиус.
+    curved_sheets = {}
+    for key, count in curved_sheets_data.items():
+        material, thickness, w, arc_len, r = key
+        grp_key = (material, thickness)
+        if grp_key not in curved_sheets:
+            curved_sheets[grp_key] = {}
+        size_key = (w, arc_len, r)
+        if size_key not in curved_sheets[grp_key]:
+            curved_sheets[grp_key][size_key] = 0
+        curved_sheets[grp_key][size_key] += count
+
+    for grp_key in curved_sheets:
+        curved_sheets[grp_key] = [(w, al, rad, c)
+                                  for (w, al, rad), c in curved_sheets[grp_key].items()]
+
+    sorted_curved_sheets = sorted(curved_sheets.keys(),
+                                  key=lambda g: (g[0] is None, g[0] or u"", g[1]))
+
     def sheet_short_label(grp_key):
         material, thickness = grp_key
         if material is None:
@@ -447,23 +478,35 @@ def calculate_parts():
             label += u" ({} кг/м2)".format(str(weight_per_m2).replace('.', ','))
         return label
 
-    def build_summary(profiles_total, sheet_totals, sheets_total):
+    def curved_sheet_label(grp_key, weight_per_m2):
+        if grp_key[0] is None:
+            return u"Лист {} мм (гнутый, уточнить материал)".format(grp_key[1])
+        if weight_per_m2 > 0:
+            return u"{} (гнутый, {} кг/м2)".format(
+                sheet_short_label(grp_key), str(weight_per_m2).replace('.', ','))
+        return u"{} (гнутый)".format(sheet_short_label(grp_key))
+
+    def build_summary(profiles_total, sheet_totals):
         """
         Итоговый блок: вес профилей одной строкой, затем вес каждого типа
-        листового материала отдельной строкой.
+        листового материала отдельной строкой. Плоские и гнутые детали
+        одного материала складываются в одну строку.
 
-        Промежуточную сумму по листовым даём только когда типов больше
-        одного, а общий вес конструкции - только когда в модели есть и
-        профили, и листы: иначе такая строка просто повторяла бы
-        единственную строку над собой.
+        Общий вес конструкции выводим только когда в модели есть и профили,
+        и листы: иначе такая строка просто повторяла бы единственную строку
+        над собой.
         """
         rows = []
         if profiles_total > 0:
             rows.append((u"Общий вес профилей:", round(profiles_total, 2), True))
-        for label, weight in sheet_totals:
-            rows.append((u"{}:".format(label), weight, False))
-        if len(sheet_totals) > 1:
-            rows.append((u"Общий вес листовых материалов:", round(sheets_total, 2), True))
+
+        sheets_total = 0.0
+        for grp_key in sorted(sheet_totals.keys(),
+                              key=lambda g: (g[0] is None, g[0] or u"", g[1])):
+            weight = round(sheet_totals[grp_key], 2)
+            sheets_total += sheet_totals[grp_key]
+            rows.append((u"{}:".format(sheet_short_label(grp_key)), weight, False))
+
         if profiles_total > 0 and sheets_total > 0:
             rows.append((u"Общий вес конструкции:",
                          round(profiles_total + sheets_total, 2), True))
@@ -486,8 +529,7 @@ def calculate_parts():
             
             row = 1
             profiles_total_weight = 0.0
-            sheets_total_weight = 0.0
-            sheet_totals = []
+            sheet_totals = {}
             
             for i, prof_key in enumerate(sorted_profiles):
                 if row > 1:
@@ -669,7 +711,6 @@ def calculate_parts():
                     if weight_per_m2 > 0:
                         total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
                         zone_total_weight += total_weight
-                        sheets_total_weight += total_weight
 
                     if j == 0:
                         sh.Cells(row, 1).Value = material_name
@@ -685,7 +726,7 @@ def calculate_parts():
                 total_row = None
                 if zone_total_weight > 0:
                     zone_total_weight = round(zone_total_weight, 2)
-                    sheet_totals.append((sheet_short_label(grp_key), zone_total_weight))
+                    sheet_totals[grp_key] = sheet_totals.get(grp_key, 0.0) + zone_total_weight
                     sh.Cells(row, 4).Value = u"Итого:"
                     sh.Cells(row, 4).Font.Bold = True
                     sh.Cells(row, 5).Value = u"{} кг".format(str(zone_total_weight).replace('.', ','))
@@ -711,11 +752,81 @@ def calculate_parts():
                         except:
                             pass
 
-            full_range = sh.Range(sh.Cells(1, 1), sh.Cells(row, 5))
+            for grp_key in sorted_curved_sheets:
+                if row > 1:
+                    row += 1
+
+                header_row = row
+                sh.Cells(row, 1).Value = u"Материал"
+                sh.Cells(row, 2).Value = u"Толщина"
+                sh.Cells(row, 3).Value = u"Размер (развёртка)"
+                sh.Cells(row, 4).Value = u"Радиус (внешн.)"
+                sh.Cells(row, 5).Value = u"Количество"
+                sh.Cells(row, 6).Value = u"Вес"
+                row += 1
+
+                weight_per_m2 = SHEET_MATERIALS.get(grp_key, 0.0)
+                material_name = curved_sheet_label(grp_key, weight_per_m2)
+                sheet_items = sorted(curved_sheets[grp_key], key=lambda x: -(x[0] * x[1]))
+                zone_total_weight = 0.0
+
+                for j, item in enumerate(sheet_items):
+                    sheet_w = item[0]
+                    sheet_l = item[1]
+                    sheet_r = item[2]
+                    count = item[3]
+                    total_weight = 0.0
+
+                    if weight_per_m2 > 0:
+                        total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
+                        zone_total_weight += total_weight
+
+                    if j == 0:
+                        sh.Cells(row, 1).Value = material_name
+                    else:
+                        sh.Cells(row, 1).Value = ""
+
+                    sh.Cells(row, 2).Value = grp_key[1]
+                    sh.Cells(row, 3).Value = u"{}x{}".format(sheet_w, sheet_l)
+                    sh.Cells(row, 4).Value = sheet_r
+                    sh.Cells(row, 5).Value = count
+                    sh.Cells(row, 6).Value = u"{} кг".format(str(total_weight).replace('.', ',')) if weight_per_m2 > 0 else u"Нет в базе"
+                    row += 1
+
+                total_row = None
+                if zone_total_weight > 0:
+                    zone_total_weight = round(zone_total_weight, 2)
+                    sheet_totals[grp_key] = sheet_totals.get(grp_key, 0.0) + zone_total_weight
+                    sh.Cells(row, 5).Value = u"Итого:"
+                    sh.Cells(row, 5).Font.Bold = True
+                    sh.Cells(row, 6).Value = u"{} кг".format(str(zone_total_weight).replace('.', ','))
+                    sh.Cells(row, 6).Font.Bold = True
+                    total_row = row
+                    row += 1
+
+                header_range = sh.Range(sh.Cells(header_row, 1), sh.Cells(header_row, 6))
+                header_range.Font.Bold = True
+                for edge in (7, 8, 9, 10, 11):
+                    try:
+                        header_range.Borders(edge).LineStyle = xlContinuous
+                        header_range.Borders(edge).Weight = xlThick
+                    except:
+                        pass
+
+                if total_row:
+                    total_range = sh.Range(sh.Cells(total_row, 5), sh.Cells(total_row, 6))
+                    for edge in (7, 8, 9, 10, 11):
+                        try:
+                            total_range.Borders(edge).LineStyle = xlContinuous
+                            total_range.Borders(edge).Weight = xlThick
+                        except:
+                            pass
+
+            full_range = sh.Range(sh.Cells(1, 1), sh.Cells(row, 6))
             full_range.HorizontalAlignment = xlLeft
             full_range.VerticalAlignment = xlCenter
             
-            summary_rows = build_summary(profiles_total_weight, sheet_totals, sheets_total_weight)
+            summary_rows = build_summary(profiles_total_weight, sheet_totals)
             if summary_rows:
                 for idx, summary_item in enumerate(summary_rows):
                     summary_row = idx + 1
@@ -750,8 +861,7 @@ def calculate_parts():
     try:
         with codecs.open(filename, 'w', encoding='utf-8-sig') as f:
             profiles_total_weight = 0.0
-            sheets_total_weight = 0.0
-            sheet_totals = []
+            sheet_totals = {}
             
             for i, prof_key in enumerate(sorted_profiles):
                 if i > 0:
@@ -840,7 +950,6 @@ def calculate_parts():
                     if weight_per_m2 > 0:
                         total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
                         zone_total_weight += total_weight
-                        sheets_total_weight += total_weight
 
                     weight_str = u"{} кг".format(str(total_weight).replace('.', ',')) if weight_per_m2 > 0 else u"Нет в базе"
                     size_str = u"{}x{}".format(sheet_w, sheet_l)
@@ -852,11 +961,45 @@ def calculate_parts():
 
                 if zone_total_weight > 0:
                     zone_total_weight = round(zone_total_weight, 2)
-                    sheet_totals.append((sheet_short_label(grp_key), zone_total_weight))
+                    sheet_totals[grp_key] = sheet_totals.get(grp_key, 0.0) + zone_total_weight
                     zone_weight_str = u"{} кг".format(str(zone_total_weight).replace('.', ','))
                     f.write(u";;;Итого:;{}\n".format(zone_weight_str))
 
-            summary_rows = build_summary(profiles_total_weight, sheet_totals, sheets_total_weight)
+            for grp_key in sorted_curved_sheets:
+                f.write(u"\n")
+
+                f.write(u"Материал;Толщина;Размер (развёртка);Радиус (внешн.);Количество;Вес\n")
+                weight_per_m2 = SHEET_MATERIALS.get(grp_key, 0.0)
+                material_name = curved_sheet_label(grp_key, weight_per_m2)
+                sheet_items = sorted(curved_sheets[grp_key], key=lambda x: -(x[0] * x[1]))
+                zone_total_weight = 0.0
+
+                for j, item in enumerate(sheet_items):
+                    sheet_w = item[0]
+                    sheet_l = item[1]
+                    sheet_r = item[2]
+                    count = item[3]
+                    total_weight = 0.0
+
+                    if weight_per_m2 > 0:
+                        total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
+                        zone_total_weight += total_weight
+
+                    weight_str = u"{} кг".format(str(total_weight).replace('.', ',')) if weight_per_m2 > 0 else u"Нет в базе"
+                    size_str = u"{}x{}".format(sheet_w, sheet_l)
+
+                    if j == 0:
+                        f.write(u"{};{};{};{};{};{}\n".format(material_name, grp_key[1], size_str, sheet_r, count, weight_str))
+                    else:
+                        f.write(u";{};{};{};{};{}\n".format(grp_key[1], size_str, sheet_r, count, weight_str))
+
+                if zone_total_weight > 0:
+                    zone_total_weight = round(zone_total_weight, 2)
+                    sheet_totals[grp_key] = sheet_totals.get(grp_key, 0.0) + zone_total_weight
+                    zone_weight_str = u"{} кг".format(str(zone_total_weight).replace('.', ','))
+                    f.write(u";;;;Итого:;{}\n".format(zone_weight_str))
+
+            summary_rows = build_summary(profiles_total_weight, sheet_totals)
             if summary_rows:
                 f.write(u"\n")
                 for summary_item in summary_rows:
