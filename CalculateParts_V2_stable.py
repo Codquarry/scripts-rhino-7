@@ -433,14 +433,41 @@ def calculate_parts():
     sorted_sheets = sorted(sheets.keys(),
                            key=lambda g: (g[0] is None, g[0] or u"", g[1]))
 
-    def sheet_label(grp_key, weight_per_m2):
+    def sheet_short_label(grp_key):
         material, thickness = grp_key
         if material is None:
-            return u"Лист {} мм (уточнить материал)".format(thickness)
-        label = u"{} {} мм".format(material, thickness)
+            return u"Лист {} мм".format(thickness)
+        return u"{} {} мм".format(material, thickness)
+
+    def sheet_label(grp_key, weight_per_m2):
+        if grp_key[0] is None:
+            return u"Лист {} мм (уточнить материал)".format(grp_key[1])
+        label = sheet_short_label(grp_key)
         if weight_per_m2 > 0:
             label += u" ({} кг/м2)".format(str(weight_per_m2).replace('.', ','))
         return label
+
+    def build_summary(profiles_total, sheet_totals, sheets_total):
+        """
+        Итоговый блок: вес профилей одной строкой, затем вес каждого типа
+        листового материала отдельной строкой.
+
+        Промежуточную сумму по листовым даём только когда типов больше
+        одного, а общий вес конструкции - только когда в модели есть и
+        профили, и листы: иначе такая строка просто повторяла бы
+        единственную строку над собой.
+        """
+        rows = []
+        if profiles_total > 0:
+            rows.append((u"Общий вес профилей:", round(profiles_total, 2), True))
+        for label, weight in sheet_totals:
+            rows.append((u"{}:".format(label), weight, False))
+        if len(sheet_totals) > 1:
+            rows.append((u"Общий вес листовых материалов:", round(sheets_total, 2), True))
+        if profiles_total > 0 and sheets_total > 0:
+            rows.append((u"Общий вес конструкции:",
+                         round(profiles_total + sheets_total, 2), True))
+        return rows
 
     try:
         import System
@@ -458,7 +485,9 @@ def calculate_parts():
             xlThick = 4
             
             row = 1
-            overall_total_weight = 0.0
+            profiles_total_weight = 0.0
+            sheets_total_weight = 0.0
+            sheet_totals = []
             
             for i, prof_key in enumerate(sorted_profiles):
                 if row > 1:
@@ -486,7 +515,7 @@ def calculate_parts():
                     if weight_per_m > 0:
                         total_weight = round((length / 1000.0) * weight_per_m * count, 2)
                         zone_total_weight += total_weight
-                        overall_total_weight += total_weight
+                        profiles_total_weight += total_weight
                         
                     if j == 0:
                         sh.Cells(row, 1).Value = profile_name
@@ -564,7 +593,7 @@ def calculate_parts():
                     if weight_per_m > 0:
                         total_weight = round((arc_len / 1000.0) * weight_per_m * count, 2)
                         zone_total_weight += total_weight
-                        overall_total_weight += total_weight
+                        profiles_total_weight += total_weight
                         
                     if j == 0:
                         sh.Cells(row, 1).Value = profile_name
@@ -640,7 +669,7 @@ def calculate_parts():
                     if weight_per_m2 > 0:
                         total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
                         zone_total_weight += total_weight
-                        overall_total_weight += total_weight
+                        sheets_total_weight += total_weight
 
                     if j == 0:
                         sh.Cells(row, 1).Value = material_name
@@ -656,6 +685,7 @@ def calculate_parts():
                 total_row = None
                 if zone_total_weight > 0:
                     zone_total_weight = round(zone_total_weight, 2)
+                    sheet_totals.append((sheet_short_label(grp_key), zone_total_weight))
                     sh.Cells(row, 4).Value = u"Итого:"
                     sh.Cells(row, 4).Font.Bold = True
                     sh.Cells(row, 5).Value = u"{} кг".format(str(zone_total_weight).replace('.', ','))
@@ -685,14 +715,16 @@ def calculate_parts():
             full_range.HorizontalAlignment = xlLeft
             full_range.VerticalAlignment = xlCenter
             
-            if overall_total_weight > 0:
-                overall_total_weight = round(overall_total_weight, 2)
-                sh.Cells(1, 8).Value = u"Общий вес конструкции:"
-                sh.Cells(1, 8).Font.Bold = True
-                sh.Cells(1, 9).Value = u"{} кг".format(str(overall_total_weight).replace('.', ','))
-                sh.Cells(1, 9).Font.Bold = True
-                
-                overall_range = sh.Range(sh.Cells(1, 8), sh.Cells(1, 9))
+            summary_rows = build_summary(profiles_total_weight, sheet_totals, sheets_total_weight)
+            if summary_rows:
+                for idx, summary_item in enumerate(summary_rows):
+                    summary_row = idx + 1
+                    sh.Cells(summary_row, 8).Value = summary_item[0]
+                    sh.Cells(summary_row, 8).Font.Bold = summary_item[2]
+                    sh.Cells(summary_row, 9).Value = u"{} кг".format(str(summary_item[1]).replace('.', ','))
+                    sh.Cells(summary_row, 9).Font.Bold = summary_item[2]
+
+                overall_range = sh.Range(sh.Cells(1, 8), sh.Cells(len(summary_rows), 9))
                 overall_range.HorizontalAlignment = xlLeft
                 overall_range.VerticalAlignment = xlCenter
                 for edge in (7, 8, 9, 10, 11):
@@ -717,7 +749,9 @@ def calculate_parts():
 
     try:
         with codecs.open(filename, 'w', encoding='utf-8-sig') as f:
-            overall_total_weight_csv = 0.0
+            profiles_total_weight = 0.0
+            sheets_total_weight = 0.0
+            sheet_totals = []
             
             for i, prof_key in enumerate(sorted_profiles):
                 if i > 0:
@@ -739,7 +773,7 @@ def calculate_parts():
                     if weight_per_m > 0:
                         total_weight = round((length / 1000.0) * weight_per_m * count, 2)
                         zone_total_weight += total_weight
-                        overall_total_weight_csv += total_weight
+                        profiles_total_weight += total_weight
                         
                     weight_str = u"{} кг".format(str(total_weight).replace('.', ',')) if total_weight > 0 else u"Нет в базе"
                     
@@ -774,7 +808,7 @@ def calculate_parts():
                     if weight_per_m > 0:
                         total_weight = round((arc_len / 1000.0) * weight_per_m * count, 2)
                         zone_total_weight += total_weight
-                        overall_total_weight_csv += total_weight
+                        profiles_total_weight += total_weight
                         
                     weight_str = u"{} кг".format(str(total_weight).replace('.', ',')) if total_weight > 0 else u"Нет в базе"
                     
@@ -806,7 +840,7 @@ def calculate_parts():
                     if weight_per_m2 > 0:
                         total_weight = round((sheet_w / 1000.0) * (sheet_l / 1000.0) * weight_per_m2 * count, 2)
                         zone_total_weight += total_weight
-                        overall_total_weight_csv += total_weight
+                        sheets_total_weight += total_weight
 
                     weight_str = u"{} кг".format(str(total_weight).replace('.', ',')) if weight_per_m2 > 0 else u"Нет в базе"
                     size_str = u"{}x{}".format(sheet_w, sheet_l)
@@ -818,13 +852,16 @@ def calculate_parts():
 
                 if zone_total_weight > 0:
                     zone_total_weight = round(zone_total_weight, 2)
+                    sheet_totals.append((sheet_short_label(grp_key), zone_total_weight))
                     zone_weight_str = u"{} кг".format(str(zone_total_weight).replace('.', ','))
                     f.write(u";;;Итого:;{}\n".format(zone_weight_str))
 
-            if overall_total_weight_csv > 0:
-                overall_total_weight_csv = round(overall_total_weight_csv, 2)
-                overall_weight_str = u"{} кг".format(str(overall_total_weight_csv).replace('.', ','))
-                f.write(u"\n;;Общий вес конструкции:;{}\n".format(overall_weight_str))
+            summary_rows = build_summary(profiles_total_weight, sheet_totals, sheets_total_weight)
+            if summary_rows:
+                f.write(u"\n")
+                for summary_item in summary_rows:
+                    f.write(u";;{};{} кг\n".format(
+                        summary_item[0], str(summary_item[1]).replace('.', ',')))
                 
         rs.MessageBox(u"Таблица успешно сохранена как CSV-файл:\n" + filename, 0, u"Готово")
     except Exception as e:
